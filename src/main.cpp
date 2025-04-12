@@ -4,25 +4,20 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include "esp_timer.h"
+#include "esp_rom_sys.h"
 
 // Timing Variables
 //                _____________                   ____________
 // Pulseinterval | PulseWidth1 | interPulseDelay | PulseWith2 | Pulseinterval
 // ______________               _________________              _______________
 
-unsigned long pulseInterval;
-unsigned long interPulseDelay;
-unsigned long pulseWidth1;
-unsigned long pulseWidth2;
-uint8_t P=1; // Start with pulseinterval
+uint32_t Intervals[4] {500, 70, 30, 50}; // Default values: PI = 500usec, PW1 = 70usec, IPD = 30usec, PW2 = 50usec.
 
 // Lower limits for the parameters
-const unsigned long minPulseInterval = 10; // Minimum 10ms
-const unsigned long minInterPulseDelay = 1; // Minimum 20us
-const unsigned long minPulseWidth = 1;  // Minimum 20us
+const uint32_t minPulseInterval = 10; // Minimum 10ms
+const uint32_t minInterPulseDelay = 1; // Minimum 1us, CPU adds 20usec overhaed ??
+const uint32_t minPulseWidth = 1;  // Minimum 1us, CPU adds 20usec overhaed ??
 
-bool enable = 0; // Wait for first JSON before enabling
 // D5 D6 pins are defined on boards like WeMOS, You can redefine it to numeric values
 #if defined(ESP32)
 #pragma message "Using ESP32 pins!"
@@ -42,17 +37,17 @@ bool enable = 0; // Wait for first JSON before enabling
 #define CPU_FREQ 100
 #endif
 
-// put function declarations here:
-static void oneshot_timer_callback(void* arg);
-esp_timer_handle_t oneshot_timer;
+// Prepare to run OUTPUT_PIN control in a separate thread. This to allow for more stable output when using short pulses
+TaskHandle_t OutputTask;
 
-volatile bool timerActive = false;
+// put function declarations here:
+void DoublePulseControl(void* parameters);
 
 void setup() {
   setCpuFrequencyMhz(CPU_FREQ);
   Serial.begin(115200);
   pinMode(OUTPUT_PIN, OUTPUT);
-  digitalWrite(1, LOW); // Initial state low (inactive)
+  digitalWrite(OUTPUT_PIN, LOW); // Initial state low (inactive)
   delay(300); // Give serial port time to open
   Serial.println("**************Dual Pulse Generator**************");
   Serial.println("> Usage: Send JSON string, for e.g {\"pulseInterval\": 100, \"interPulseDelay\": 200, \"pulseWidth1\": 10, \"pulseWidth2\": 10}.");
@@ -61,15 +56,18 @@ void setup() {
   Serial.println(">                _____________                   ____________");
   Serial.println("> pulseInterval | pulseWidth1 | interPulseDelay | pulseWith2 | pulseInterval");
   Serial.println("> ______________               _________________              _______________");
+  Serial.print("Running on core ");
+  Serial.println(xPortGetCoreID());
 
-  //create timer parameters..
-  const esp_timer_create_args_t oneshot_timer_args = {
-    .callback = &oneshot_timer_callback, //link the call back
-    .arg = nullptr, //not passing in anything
-    .name = "one-shot" //nice name
-  };
-  //create timer, not running yet..
-  ESP_ERROR_CHECK(esp_timer_create(&oneshot_timer_args, &oneshot_timer));
+  // All code to control the output needs to go to core 0
+  xTaskCreatePinnedToCore(
+    DoublePulseControl,     /* Function to implement the task */
+    "OuputTask",            /* Name of the task */
+    10000,                  /* Stack size in words */
+    NULL,                   /* Task input parameter */
+    2,                      /* Priority of the task, 0 = lowest */
+    &OutputTask,            /* Task handle. */
+    0);                     /* Core where the task should run */
 }
 
 void loop() {
@@ -84,8 +82,8 @@ void loop() {
       return;
     } else {
       unsigned long tempPulseInterval = doc["pulseInterval"];
-      unsigned long tempInterPulseDelay = doc["interPulseDelay"];
       unsigned long tempPulseWidth1 = doc["pulseWidth1"];
+      unsigned long tempInterPulseDelay = doc["interPulseDelay"];
       unsigned long tempPulseWidth2 = doc["pulseWidth2"];
 
       // Check and enforce lower bounds
@@ -125,57 +123,35 @@ void loop() {
 
       // Update values only if all are within bounds
       if (!outOfBounds) {
-        pulseInterval = tempPulseInterval;
-        interPulseDelay = tempInterPulseDelay;
-        pulseWidth1 = tempPulseWidth1;
-        pulseWidth2 = tempPulseWidth2;
+        Intervals[0] = tempPulseInterval;
+        Intervals[1] = tempPulseWidth1;
+        Intervals[2] = tempInterPulseDelay;
+        Intervals[3] = tempPulseWidth2;
         
         // Send back the values to the PC for verification
         Serial.print(F(">OK Parsed values - pulseInterval: "));
-        Serial.print(pulseInterval);
-        Serial.print(F("usec, interPulseDelay: "));
-        Serial.print(interPulseDelay);
+        Serial.print(Intervals[0]);
         Serial.print(F("usec, pulseWidth1: "));
-        Serial.println(pulseWidth1);
+        Serial.println(Intervals[1]);
+        Serial.print(F("usec, interPulseDelay: "));
+        Serial.print(Intervals[2]);
         Serial.print(F("usec, pulseWidth2: "));
-        Serial.println(pulseWidth2);
-        enable = 1;
+        Serial.println(Intervals[3]);
       }
-    }
-  }
-  if (enable == 1) {
-    if (!timerActive) {
-      //check state of timer and stop it if needed..
-      if (esp_timer_is_active(oneshot_timer)) {
-        ESP_ERROR_CHECK(esp_timer_stop(oneshot_timer));
-      }
-      switch(P){
-        case 1:
-          ESP_ERROR_CHECK(esp_timer_start_once(oneshot_timer, pulseInterval));
-          P++;
-          break;
-        case 2:
-          ESP_ERROR_CHECK(esp_timer_start_once(oneshot_timer, pulseWidth1));
-          P++;
-        break;
-        case 3:
-          ESP_ERROR_CHECK(esp_timer_start_once(oneshot_timer, interPulseDelay));
-          P++;
-          break;
-        case 4:
-          ESP_ERROR_CHECK(esp_timer_start_once(oneshot_timer, pulseWidth2));
-          P=1;
-          break;
-        default:
-          P=1;
-      }
-      timerActive = true;
     }
   }
 }
 
-static void oneshot_timer_callback(void* arg)
-{
-  digitalWrite(OUTPUT_PIN, !digitalRead(OUTPUT_PIN));
-  timerActive = false;//say we're done..
+// Runs in core 0, seperate from the rest of the program
+void DoublePulseControl(void* parameters) {
+  for(;;) { 
+    digitalWrite(OUTPUT_PIN, LOW);
+    esp_rom_delay_us(Intervals[0]); // Pulseinterval
+    digitalWrite(OUTPUT_PIN, HIGH); 
+    esp_rom_delay_us(Intervals[1]); // PulseWidth1
+    digitalWrite(OUTPUT_PIN, LOW);
+    esp_rom_delay_us(Intervals[2]); // interPulseDelay
+    digitalWrite(OUTPUT_PIN, HIGH);
+    esp_rom_delay_us(Intervals[3]); // PulseWith2
+  }
 }
