@@ -15,8 +15,8 @@ uint32_t Intervals[4] {500, 70, 30, 50}; // Default values: PI = 500usec, PW1 = 
 
 // Lower limits for the parameters
 const uint32_t minPulseInterval = 10; // Minimum 10ms
-const uint32_t minInterPulseDelay = 1; // Minimum 1us, CPU adds 20usec overhaed ??
-const uint32_t minPulseWidth = 1;  // Minimum 1us, CPU adds 20usec overhaed ??
+const uint32_t minInterPulseDelay = 1; // Minimum 1us
+const uint32_t minPulseWidth = 1;  // Minimum 1us
 
 // D5 D6 pins are defined on boards like WeMOS, You can redefine it to numeric values
 #if defined(ESP32)
@@ -50,22 +50,20 @@ void setup() {
   digitalWrite(OUTPUT_PIN, LOW); // Initial state low (inactive)
   delay(300); // Give serial port time to open
   Serial.println("**************Dual Pulse Generator**************");
-  Serial.println("> Usage: Send JSON string, for e.g {\"pulseInterval\": 100, \"interPulseDelay\": 200, \"pulseWidth1\": 10, \"pulseWidth2\": 10}.");
+  Serial.println("> Usage: Send JSON string, for e.g {\"pulseInterval\": 100, \"pulseWidth1\": 10, \"interPulseDelay\": 200, \"pulseWidth2\": 10}.");
   Serial.print("> Values are in microseconds (note: ESP32 adds 20usec per interval). Using output port: ");
   Serial.println(OUTPUT_PIN);
-  Serial.println(">                _____________                   ____________");
+  Serial.println("> Default        _____________                   ____________");
   Serial.println("> pulseInterval | pulseWidth1 | interPulseDelay | pulseWith2 | pulseInterval");
-  Serial.println("> ______________               _________________              _______________");
-  Serial.print("Running on core ");
-  Serial.println(xPortGetCoreID());
+  Serial.println("> ___ 500_______      70       _____ 30 ________      50      _____ 500 ____");
 
-  // All code to control the output needs to go to core 0
+  // Run code to control the output onto core 0
   xTaskCreatePinnedToCore(
     DoublePulseControl,     /* Function to implement the task */
     "OuputTask",            /* Name of the task */
     10000,                  /* Stack size in words */
     NULL,                   /* Task input parameter */
-    2,                      /* Priority of the task, 0 = lowest */
+    0,                      /* Priority of the task, 0 = lowest */
     &OutputTask,            /* Task handle. */
     0);                     /* Core where the task should run */
 }
